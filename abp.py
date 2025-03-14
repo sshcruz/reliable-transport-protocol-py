@@ -1,127 +1,81 @@
-import random
 import heapq
 
-class Message:
-    def __init__(self, data):
-        self.data = data[:20]
 
-class Packet:
-    def __init__(self, seqnum, acknum, payload=""):
-        self.seqnum = seqnum
-        self.acknum = acknum
-        self.payload = payload[:20]
-        self.checksum = self.compute_checksum()
+def get_checksum(packet):
+    """ Calcula o checksum do pacote """
+    return sum(ord(c) for c in packet['payload']) + packet['seqnum'] + packet['acknum']
 
-    def compute_checksum(self):
-        return self.seqnum + self.acknum + sum(ord(c) for c in self.payload)
 
-class Sender:
-    WAIT_LAYER5 = 0
-    WAIT_ACK = 1
-
+class ABPProtocol:
     def __init__(self):
-        self.state = self.WAIT_LAYER5
-        self.seq = 0
-        self.estimated_rtt = 15
-        self.last_packet = None
+        self.A = {'seqnum': 0, 'last_packet': None}
+        self.B = {'expected_seqnum': 0}
+        self.event_queue = []
+        self.time = 0.0
 
-class Receiver:
-    def __init__(self):
-        self.seq = 0
+    def to_layer3(self, packet):
+        """ Envia o pacote para a camada 3 """
+        heapq.heappush(self.event_queue, (self.time + 5, 'FROM_LAYER3', packet))
+        print(f"Sent to layer 3: {packet}")
 
-A = Sender()
-B = Receiver()
-event_queue = []
-time = 0.0
+    def to_layer5(self, message):
+        """ Entrega a mensagem à camada 5 (destino final) """
+        print(f"Delivered to layer 5: {message}")
 
-def start_timer(entity, duration):
-    heapq.heappush(event_queue, (time + duration, "TIMER_INTERRUPT", entity))
+    def A_output(self, message):
+        """ A envia um pacote """
+        packet = {'seqnum': self.A['seqnum'], 'acknum': 0, 'payload': message}
+        packet['checksum'] = get_checksum(packet)
+        self.A['last_packet'] = packet  # Armazena o último pacote enviado
+        print(f"A_output: Sending packet: {message}")
+        self.to_layer3(packet)
 
-def stop_timer(entity):
-    global event_queue
-    event_queue = [e for e in event_queue if not (e[1] == "TIMER_INTERRUPT" and e[2] == entity)]
-    heapq.heapify(event_queue)
+    def A_timerinterrupt(self):
+        """ Reenvia pacote ao ocorrer timeout """
+        print("Event: TIMER_INTERRUPT")
+        if self.A['last_packet']:
+            print("A_timerinterrupt: Resending last packet.")
+            self.to_layer3(self.A['last_packet'])
 
-def to_layer3(entity, packet):
-    heapq.heappush(event_queue, (time + random.uniform(5, 10), "FROM_LAYER3", entity, packet))
+    def B_input(self, packet):
+        """ B recebe um pacote """
+        if not isinstance(packet, dict):
+            print("B_input: Received an invalid packet format.")
+            return
 
-def to_layer5(entity, data):
-    print(f"Layer 5 received at entity {entity}: {data}")
+        print(f"B_input: Received message: {packet.get('payload', '[No Payload]')}")
 
-def A_output(message):
-    if A.state != Sender.WAIT_LAYER5:
-        print(f"A_output: Waiting for ACK, dropping message: {message.data}")
-        return
-    print(f"A_output: Sending packet: {message.data}")
-    packet = Packet(A.seq, 0, message.data)
-    A.last_packet = packet
-    A.state = Sender.WAIT_ACK
-    to_layer3(0, packet)
-    start_timer(0, A.estimated_rtt)
+        if packet['checksum'] != get_checksum(packet):
+            print("B_input: Checksum error! Ignoring packet.")
+            return
 
-def A_input(packet):
-    if A.state != Sender.WAIT_ACK:
-        print("A_input: Unexpected state, dropping packet.")
-        return
-    if packet.checksum != packet.compute_checksum():
-        print("A_input: Corrupt ACK, dropping.")
-        return
-    if packet.acknum != A.seq:
-        print("A_input: Unexpected ACK, dropping.")
-        return
-    print("A_input: ACK received.")
-    stop_timer(0)
-    A.seq = 1 - A.seq
-    A.state = Sender.WAIT_LAYER5
+        if packet['seqnum'] == self.B['expected_seqnum']:
+            self.to_layer5(packet['payload'])
+            ack_packet = {'seqnum': packet['seqnum'], 'acknum': packet['seqnum'], 'payload': '', 'checksum': 0}
+            self.to_layer3(ack_packet)
+            self.B['expected_seqnum'] = 1 - self.B['expected_seqnum']
+        else:
+            print("B_input: Unexpected sequence number. Sending NAK.")
+            nak_packet = {'seqnum': self.B['expected_seqnum'], 'acknum': self.B['expected_seqnum'], 'payload': '',
+                          'checksum': 0}
+            self.to_layer3(nak_packet)
 
-def A_timerinterrupt():
-    if A.state != Sender.WAIT_ACK:
-        print("A_timerinterrupt: No pending ACK, ignoring.")
-        return
-    print(f"A_timerinterrupt: Resending packet: {A.last_packet.payload}")
-    to_layer3(0, A.last_packet)
-    start_timer(0, A.estimated_rtt)
+    def run(self):
+        """ Executa o protocolo """
+        while self.event_queue:
+            self.time, event_type, args = heapq.heappop(self.event_queue)
+            print(f"Event: {event_type} at time {self.time}")
 
-def A_init():
-    A.state = Sender.WAIT_LAYER5
-    A.seq = 0
-    A.estimated_rtt = 15
+            if event_type == 'FROM_LAYER3':
+                if isinstance(args, dict):
+                    self.B_input(args)
+                else:
+                    print("Error: Invalid packet received from layer 3.")
+            elif event_type == 'TIMER_INTERRUPT':
+                self.A_timerinterrupt()
 
-def send_ack(entity, ack):
-    packet = Packet(0, ack)
-    to_layer3(entity, packet)
 
-def B_input(packet):
-    if packet.checksum != packet.compute_checksum():
-        print("B_input: Corrupt packet, sending NAK.")
-        send_ack(1, 1 - B.seq)
-        return
-    if packet.seqnum != B.seq:
-        print("B_input: Unexpected sequence number, sending NAK.")
-        send_ack(1, 1 - B.seq)
-        return
-    print(f"B_input: Received message: {packet.payload}")
-    send_ack(1, B.seq)
-    to_layer5(1, packet.payload)
-    B.seq = 1 - B.seq
-
-def B_init():
-    B.seq = 0
-
-def simulate():
-    global time
-    while event_queue:
-        event = heapq.heappop(event_queue)
-        time = event[0]
-        if event[1] == "TIMER_INTERRUPT":
-            if event[2] == 0:
-                A_timerinterrupt()
-        elif event[1] == "FROM_LAYER3":
-            if event[2] == 0:
-                A_input(event[3])
-            else:
-                B_input(event[3])
-
-A_init()
-B_init()
-simulate()
+# Teste simples
+protocol = ABPProtocol()
+protocol.A_output("Hello, B!")
+protocol.run()
